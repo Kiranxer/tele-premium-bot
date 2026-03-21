@@ -1,8 +1,8 @@
 const plans = {
-  buy_1: { price: 4900, days: 1 },
-  buy_7: { price: 14900, days: 7 },
-  buy_20: { price: 19900, days: 20 },
-  buy_life: { price: 39900, days: 9999 }
+  buy_1: { price: 49, days: 1 },
+  buy_7: { price: 149, days: 7 },
+  buy_20: { price: 199, days: 20 },
+  buy_life: { price: 399, days: 9999 }
 };
 
 function setupPayments(bot) {
