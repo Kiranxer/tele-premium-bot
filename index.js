@@ -17,26 +17,21 @@ app.use(express.json());
 process.on("unhandledRejection", console.error);
 process.on("uncaughtException", console.error);
 
-// 🤖 Bot (NO polling)
+// 🤖 Bot init (NO polling)
 const bot = new TelegramBot(token);
 
-// Setup handlers
+// Setup modules
 const plans = setupPayments(bot);
 setupCommands(bot);
 setupGroup(bot);
 setupAdmin(bot);
 setupPromo(bot);
 
-// 🌐 Health routes (Koyeb requirement)
-app.get("/", (req, res) => {
-  res.send("🤖 Bot is running!");
-});
+// 🌐 Routes (Koyeb health check)
+app.get("/", (req, res) => res.send("🤖 Bot running"));
+app.get("/health", (req, res) => res.send("OK"));
 
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
-
-// 📩 Webhook route
+// 📩 Webhook
 app.post(`/bot${token}`, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
@@ -44,21 +39,25 @@ app.post(`/bot${token}`, (req, res) => {
 
 // 🚀 Start server
 app.listen(port, async () => {
-  console.log(`🌐 Server running on port ${port}`);
+  console.log(`🌐 Running on ${port}`);
 
   try {
     await bot.setWebHook(`${webhookUrl}/bot${token}`);
     console.log("✅ Webhook set");
   } catch (err) {
-    console.error("❌ Webhook error:", err);
+    console.log("Webhook error:", err.message);
   }
 });
 
-// 💰 Payment success handler
+// 💰 PAYMENT HANDLER (FIXED ASYNC)
 bot.on("message", async (msg) => {
-  if (msg.successful_payment) {
+  try {
+    if (!msg.successful_payment) return;
+
     const userId = msg.from.id;
     const plan = plans[msg.successful_payment.invoice_payload];
+
+    if (!plan) return;
 
     let expiry =
       plan.days === 9999
@@ -73,154 +72,64 @@ bot.on("message", async (msg) => {
     await db.incrementPurchase(userId);
 
     // ✅ Allow media
-    bot.restrictChatMember(groupId, userId, {
+    await bot.restrictChatMember(groupId, userId, {
       can_send_messages: true,
       can_send_media_messages: true
     });
 
-    // 🔔 Notify admin
-    bot.sendMessage(adminId,
+    // 🔔 Admin alert
+    await bot.sendMessage(adminId,
 `💰 NEW PAYMENT
 
 👤 ${msg.from.first_name}
 🆔 ${userId}
 📦 ${plan.days} days`);
 
-    bot.sendMessage(userId, "🎉 Premium Activated! Enjoy 💎");
+    await bot.sendMessage(userId, "🎉 Premium Activated!");
+  } catch (err) {
+    console.log("Payment error:", err.message);
   }
 });
 
-// ⏳ GLOBAL CHECKER (Premium + Trial + Reminders)
+// ⏳ GLOBAL CHECKER (FIXED ASYNC)
 setInterval(async () => {
-  const users = await db.getAllUsers();
-  const now = Date.now();
+  try {
+    const users = await db.getAllUsers();
+    const now = Date.now();
 
-  for (let u of users) {
+    for (let u of users) {
 
-    // =========================
-    // 💎 PREMIUM EXPIRY
-    // =========================
-    if (
-      u.is_paid &&
-      u.expiry !== "lifetime" &&
-      u.expiry < now
-    ) {
-      await db.updateUser(u.user_id, { is_paid: false });
+      // 💎 PREMIUM EXPIRY
+      if (u.is_paid && u.expiry !== "lifetime" && u.expiry < now) {
+        await db.updateUser(u.user_id, { is_paid: false });
 
-      bot.restrictChatMember(groupId, u.user_id, {
-        can_send_messages: true,
-        can_send_media_messages: false
-      });
+        await bot.restrictChatMember(groupId, u.user_id, {
+          can_send_messages: true,
+          can_send_media_messages: false
+        });
 
-      bot.sendMessage(u.user_id,
-"⚠️ Your premium expired.\nUpgrade again 💎");
-    }
-
-    // =========================
-    // 🎁 TRIAL REMINDERS
-    // =========================
-    if (u.trial_expiry && u.trial_started_at) {
-
-      const elapsed = now - u.trial_started_at;
-
-      // ⏳ 30 min
-      if (elapsed > 30 * 60 * 1000 && elapsed < 31 * 60 * 1000) {
-        bot.sendMessage(u.user_id,
-"⏳ 30 MIN LEFT!\nUpgrade now 💎");
+        bot.sendMessage(u.user_id, "⚠️ Premium expired.");
       }
 
-      // ⚠️ 10 min
-      if (
-        now > u.trial_expiry - 10 * 60 * 1000 &&
-        now < u.trial_expiry - 9 * 60 * 1000
-      ) {
-        bot.sendMessage(u.user_id,
-"⚠️ Only 10 minutes left!\n👉 /start");
-      }
+      // 🎁 TRIAL EXPIRY
+      if (!u.is_paid && u.trial_expiry && u.trial_expiry < now) {
+        await db.updateUser(u.user_id, {
+          trial_expiry: null,
+          trial_started_at: null
+        });
 
-      // 🚨 1 min
-      if (
-        now > u.trial_expiry - 60 * 1000 &&
-        now < u.trial_expiry
-      ) {
+        await bot.restrictChatMember(groupId, u.user_id, {
+          can_send_messages: true,
+          can_send_media_messages: false
+        });
+
         bot.sendMessage(u.user_id,
-"🚨 LAST MINUTE!\nUpgrade NOW 💎🔥");
+"⛔ Trial ended!\nUpgrade with /start 💎");
       }
     }
-
-    // =========================
-    // ❌ TRIAL EXPIRY
-    // =========================
-    if (
-      !u.is_paid &&
-      u.trial_expiry &&
-      u.trial_expiry < now
-    ) {
-      await db.updateUser(u.user_id, {
-        trial_expiry: null,
-        trial_started_at: null
-      });
-
-      bot.restrictChatMember(groupId, u.user_id, {
-        can_send_messages: true,
-        can_send_media_messages: false
-      });
-
-      bot.sendMessage(u.user_id,
-`⛔ TRIAL ENDED!
-
-You experienced premium 😎
-
-💎 Continue for just 49⭐
-👉 /start`);
-    }
+  } catch (err) {
+    console.log("Interval error:", err.message);
   }
 }, 60000);
 
 console.log("🚀 Bot starting...");
-    await db.updateUser(userId, {
-      is_paid: true,
-      expiry
-    });
-
-    // Allow media in group
-    bot.restrictChatMember(groupId, userId, {
-      can_send_messages: true,
-      can_send_media_messages: true
-    });
-
-    // Notify admin
-    bot.sendMessage(adminId,
-`💰 NEW PAYMENT
-
-👤 ${msg.from.first_name}
-🆔 ${userId}
-📦 ${plan.days} days`);
-
-    bot.sendMessage(userId, "🎉 Premium Activated! Enjoy 💎");
-  }
-});
-
-// ⏳ Auto expiry checker
-setInterval(async () => {
-  const users = await db.getAllUsers();
-
-  for (let u of users) {
-    if (
-      u.is_paid &&
-      u.expiry !== "lifetime" &&
-      u.expiry < Date.now()
-    ) {
-      await db.updateUser(u.user_id, { is_paid: false });
-
-      bot.restrictChatMember(groupId, u.user_id, {
-        can_send_messages: true,
-        can_send_media_messages: false
-      });
-
-      bot.sendMessage(u.user_id, "⚠️ Your premium expired.");
-    }
-  }
-}, 60000);
-
-console.log("🚀 Bot is starting...");
